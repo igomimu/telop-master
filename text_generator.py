@@ -8,7 +8,7 @@ import sys
 # output directory
 OUTPUT_DIR = "/mnt/c/Users/lucky/Desktop/Ichigo_Assets"
 # font path
-FONT_PATH = "/home/mimura/.local/share/fonts/NotoSansCJKjp-Regular.otf"
+FONT_PATH = "/mnt/c/Windows/Fonts/msgothic.ttc"
 
 def ensure_dir(directory):
     if not os.path.exists(directory):
