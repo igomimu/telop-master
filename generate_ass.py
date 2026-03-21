@@ -242,7 +242,7 @@ OLLAMA_SYSTEM_PROMPT = """\
 {go_terms}
 """
 
-OLLAMA_MODEL = "qwen2.5:7b"
+OLLAMA_MODEL = "hf.co/mmnga-o/NVIDIA-Nemotron-Nano-9B-v2-Japanese-gguf:Q4_K_M"
 
 
 def refine_with_ollama(segments, ollama_host, batch_size=10):
