@@ -394,13 +394,47 @@ def to_vertical(text):
     return '\\N'.join(result)
 
 
+def review_names(transcript):
+    """人名が含まれそうなセグメントを抽出して表示"""
+    # 人名を示唆するパターン（囲碁用語カタカナは除外）
+    name_patterns = [
+        r'[一-龥]{2,4}[一二三四五六七八九十]?段',  # X段
+        r'[一-龥]{2,4}さん',  # Xさん
+        r'[一-龥]{2,4}先生',  # X先生
+        r'[一-龥]{2,4}名人',  # X名人
+        r'[一-龥]{2,4}棋聖',  # X棋聖
+        r'[一-龥]{2,4}本因坊',  # X本因坊
+    ]
+    combined = re.compile('|'.join(name_patterns))
+
+    found = []
+    for i, seg in enumerate(transcript):
+        text = seg['text'].strip()
+        matches = combined.findall(text)
+        if matches:
+            m = int(seg['start'] // 60)
+            s = int(seg['start'] % 60)
+            found.append((i, f"{m:02d}:{s:02d}", text, matches))
+
+    if not found:
+        print("\n人名候補: なし")
+        return
+
+    print(f"\n=== 人名候補: {len(found)}箇所 ===")
+    for i, ts, text, matches in found:
+        print(f"  [{i+1}] {ts}  {text}")
+        print(f"         検出: {', '.join(matches)}")
+    print("=" * 40)
+    print("修正が必要なら GO_CORRECTIONS に追加してください\n")
+
+
 def generate_ass(transcript, output_path, title="囲碁講座"):
     """Whisper JSONからASS字幕ファイルを生成"""
     with open(output_path, 'w', encoding='utf-8-sig') as f:
         f.write(ASS_HEADER.format(title=title))
         count = 0
         for seg in transcript:
-            text = correct_text(seg['text'].strip())
+            text = seg['text'].strip()
             if not text:
                 continue
             vtext = to_vertical(text)
@@ -419,6 +453,7 @@ def main():
     parser.add_argument('--no-llm', action='store_true', help='LLM補正をスキップ（辞書ルールのみ）')
     parser.add_argument('--ollama-host', default='http://localhost:11434', help='Ollamaホスト')
     parser.add_argument('--batch-size', type=int, default=10, help='LLMバッチサイズ')
+    parser.add_argument('--review-names', action='store_true', help='人名候補を表示して確認')
     args = parser.parse_args()
 
     with open(args.transcript) as f:
@@ -430,7 +465,15 @@ def main():
     if not args.no_llm:
         transcript = refine_with_ollama(transcript, args.ollama_host, args.batch_size)
 
-    # ASS生成（ルールベース修正 + 縦書き変換）
+    # ルールベース修正を適用
+    for seg in transcript:
+        seg['text'] = correct_text(seg['text'].strip())
+
+    # 人名レビュー
+    if args.review_names:
+        review_names(transcript)
+
+    # ASS生成（縦書き変換）
     generate_ass(transcript, args.output, args.title)
 
 
