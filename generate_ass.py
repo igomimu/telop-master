@@ -30,6 +30,66 @@ import argparse
 import sys
 from pathlib import Path
 
+# --- 棋士名辞書ベース修正（pykakasi読み→正字変換） ---
+
+def fix_kishi_names(transcript):
+    """pykakasiで読みに変換し、棋士辞書から正しい漢字表記に修正"""
+    try:
+        import pykakasi
+    except ImportError:
+        print("Warning: pykakasi not installed, skipping kishi name fix")
+        return transcript
+
+    kishi_path = Path.home() / "kishi-data" / "kishi_dictionary_final.txt"
+    if not kishi_path.exists():
+        # LEGIONのprojects配下も試す
+        kishi_path = Path.home() / "projects" / "kishi-data" / "kishi_dictionary_final.txt"
+    if not kishi_path.exists():
+        print("Warning: kishi_dictionary_final.txt not found, skipping kishi name fix")
+        return transcript
+
+    kishi = {}
+    with open(kishi_path, encoding="utf-8") as f:
+        for line in f:
+            cols = line.strip().split("\t")
+            if len(cols) >= 2:
+                kishi[cols[0]] = cols[1]
+
+    kks = pykakasi.kakasi()
+    fix_count = 0
+
+    for seg in transcript:
+        text = seg['text']
+        result = kks.convert(text)
+        tokens = [(item['orig'], item['hira']) for item in result]
+
+        # 長い一致を優先するため、置換リストを先に収集
+        replacements = []
+        i = 0
+        while i < len(tokens):
+            matched = False
+            # 6トークンから1トークンまで試す（最長一致）
+            for length in range(min(6, len(tokens) - i), 0, -1):
+                reading = ''.join(tokens[j][1] for j in range(i, i + length))
+                orig = ''.join(tokens[j][0] for j in range(i, i + length))
+                if reading in kishi and orig != kishi[reading]:
+                    replacements.append((orig, kishi[reading]))
+                    i += length
+                    matched = True
+                    break
+            if not matched:
+                i += 1
+
+        # テキストに置換を適用
+        for orig, correct in replacements:
+            text = text.replace(orig, correct, 1)
+            fix_count += 1
+        seg['text'] = text
+
+    print(f"棋士名修正: {fix_count}件")
+    return transcript
+
+
 # --- 囲碁用語修正辞書（ルールベース、LLM前後どちらでも効く） ---
 
 # 固定文字列置換（Whisperの誤認識を修正）
@@ -55,6 +115,8 @@ GO_CORRECTIONS = {
     '本田光彦': '本田満彦',
     '後藤真奈': '五藤眞奈',
     '張千恵': '張心治',
+    '高尾新宿弾': '高尾紳路九段',
+    '優卓弾': '裕太九段',
     '柴野': '芝野',
     # --- 囲碁用語（確認済み） ---
     '三村文化': '三村門下',
@@ -63,6 +125,7 @@ GO_CORRECTIONS = {
     '規制戦': '棋聖戦',
     '日本金': '日本棋院',
     '関西金': '関西棋院',
+    '関西菌': '関西棋院',
     '指導後': '指導碁',
     '球場中': '休場中',
     '早子': '早碁',
@@ -71,14 +134,15 @@ GO_CORRECTIONS = {
     '視聴': 'シチョウ',
     # --- 段位 ---
     '初弾': '初段',
-    '2弾': '二段',
-    '3弾': '三段',
-    '4弾': '四段',
-    '5弾': '五段',
-    '6弾': '六段',
-    '7弾': '七段',
-    '8弾': '八段',
-    '9弾': '九段',
+    '二弾': '二段', '2弾': '二段',
+    '三弾': '三段', '3弾': '三段',
+    '四弾': '四段', '4弾': '四段',
+    '五弾': '五段', '5弾': '五段',
+    '六弾': '六段', '6弾': '六段',
+    '七弾': '七段', '7弾': '七段',
+    '八弾': '八段', '8弾': '八段',
+    '九弾': '九段', '9弾': '九段',
+    '十弾': '十段', '10弾': '十段',
     # --- 一般 ---
     '騎士': '棋士',
     '入団': '入段',
@@ -585,6 +649,7 @@ WrapStyle: 2
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 Style: Tategaki,IPAGothic,38,&H00FFFFFF,&H000000FF,&H00000000,&H80384030,-1,0,0,0,100,100,8,0,3,2,0,7,25,0,20,1
+Style: Yokogaki,IPAGothic,72,&H00FFFFFF,&H000000FF,&H00000000,&H80384030,-1,0,0,0,100,100,0,0,3,2,0,1,30,30,30,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -832,8 +897,9 @@ def review_names(transcript):
     print("修正が必要なら GO_CORRECTIONS に追加してください\n")
 
 
-def generate_ass(transcript, output_path, title="囲碁講座"):
+def generate_ass(transcript, output_path, title="囲碁講座", horizontal=False):
     """Whisper JSONからASS字幕ファイルを生成"""
+    style = "Yokogaki" if horizontal else "Tategaki"
     with open(output_path, 'w', encoding='utf-8-sig') as f:
         f.write(ASS_HEADER.format(title=title))
         count = 0
@@ -841,10 +907,26 @@ def generate_ass(transcript, output_path, title="囲碁講座"):
             text = seg['text'].strip()
             if not text:
                 continue
-            vtext = to_vertical(text)
-            f.write(f"Dialogue: 0,{time_to_ass(seg['start'])},{time_to_ass(seg['end'])},Tategaki,,0,0,0,,{vtext}\n")
-            count += 1
-    print(f"Generated: {output_path} ({count} entries)")
+            if horizontal:
+                # 長いテロップは25文字ごとに分割し、時間を按分
+                max_chars = 25
+                if len(text) <= max_chars:
+                    f.write(f"Dialogue: 0,{time_to_ass(seg['start'])},{time_to_ass(seg['end'])},{style},,0,0,0,,{text}\n")
+                    count += 1
+                else:
+                    chunks = [text[i:i+max_chars] for i in range(0, len(text), max_chars)]
+                    duration = seg['end'] - seg['start']
+                    chunk_dur = duration / len(chunks)
+                    for ci, chunk in enumerate(chunks):
+                        cs = seg['start'] + chunk_dur * ci
+                        ce = seg['start'] + chunk_dur * (ci + 1)
+                        f.write(f"Dialogue: 0,{time_to_ass(cs)},{time_to_ass(ce)},{style},,0,0,0,,{chunk}\n")
+                        count += 1
+            else:
+                display_text = to_vertical(text)
+                f.write(f"Dialogue: 0,{time_to_ass(seg['start'])},{time_to_ass(seg['end'])},{style},,0,0,0,,{display_text}\n")
+                count += 1
+    print(f"Generated: {output_path} ({count} entries, {'横書き' if horizontal else '縦書き'})")
 
 
 def main():
@@ -858,6 +940,8 @@ def main():
     parser.add_argument('--ollama-host', default='http://localhost:11434', help='Ollamaホスト')
     parser.add_argument('--batch-size', type=int, default=10, help='LLMバッチサイズ')
     parser.add_argument('--review-names', action='store_true', help='人名候補を表示して確認')
+    parser.add_argument('--horizontal', action='store_true', help='横書き字幕（最下段左揃え）')
+    parser.add_argument('--kishi-fix', action='store_true', help='棋士名辞書で自動修正（pykakasi）')
     args = parser.parse_args()
 
     with open(args.transcript) as f:
@@ -873,12 +957,16 @@ def main():
     for seg in transcript:
         seg['text'] = correct_text(seg['text'].strip())
 
+    # 棋士名辞書修正（pykakasi読み→正字）
+    if args.kishi_fix:
+        transcript = fix_kishi_names(transcript)
+
     # 人名レビュー
     if args.review_names:
         review_names(transcript)
 
-    # ASS生成（縦書き変換）
-    generate_ass(transcript, args.output, args.title)
+    # ASS生成
+    generate_ass(transcript, args.output, args.title, horizontal=args.horizontal)
 
 
 if __name__ == '__main__':
