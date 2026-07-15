@@ -5,16 +5,22 @@
 ## 全体ワークフロー
 
 ```
-録画(OBS) → カット編集(Camtasia) → 文字起こし+テロップ(LEGION) → BGM/サムネ/概要欄
+録画(OBS) → 無音カット(auto-editor, LEGION) → Camtasiaで仕上げ編集 → 文字起こし+テロップ(LEGION) → BGM/サムネ/概要欄
 ```
 
-## カット編集: Camtasia の Remove Silence を使う
+## カット編集: auto-editor で無音区間を自動カット
 
-追加ツール不要。Camtasia標準の Audioパネル → Remove Silence で無音区間を自動検出・削除できる。
+Camtasia 2019には無音自動削除機能が無い（TechSmithの Remove Silence は Camtasia Audiate との連携機能で、2022年以降のバージョン向け）。代わりに無料OSSツール [auto-editor](https://auto-editor.com/) を使う。
 
-- **閾値(Threshold)は厳しめ**（無音とみなすdBを低め）に設定する
-- **最小無音長(Minimum Duration)は1.5〜2秒以上**にする — 囲碁解説特有の「次の一手を考える間」は価値のある沈黙なので、短い閾値だと誤って削ってしまう
-- 削りすぎた場合の救済ではなく、全体の間延び感を整える用途として Clip Speed を併用してもよい
+```bash
+pip install --user --break-system-packages auto-editor  # 導入済みならスキップ
+
+./cut_silence.sh raw_recording.mp4 cut.mp4
+```
+
+`cut_silence.sh` は囲碁解説向けに `--margin 1.5sec` をデフォルトにしている。auto-editorの `--margin` は「loud区間の近くのLENGTH未満の無音はloudとみなす」仕様なので、1.5秒未満の無音（次の一手を考える間など）は自動的に残り、それより長い無音だけがカットされる。
+
+生録画に対してCamtasiaで編集する**前**にかける。Camtasia側でタイムラインをいじった後だとカット区間がズレやすいため。
 
 ## ツール一覧
 
