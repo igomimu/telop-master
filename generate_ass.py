@@ -28,7 +28,10 @@ import re
 import csv
 import argparse
 import sys
+import time
 from pathlib import Path
+
+import llm_gemini
 
 # --- 棋士名辞書ベース修正（pykakasi読み→正字変換） ---
 
@@ -689,9 +692,9 @@ def load_go_terms() -> str:
                 lines.append(f"{term}（{cat}）")
     return "\n".join(lines)
 
-# --- Ollama LLM補正 ---
+# --- LLM補正（Gemini / Ollama 共通） ---
 
-OLLAMA_SYSTEM_PROMPT = """\
+REFINE_SYSTEM_PROMPT = """\
 囲碁の字幕校正者です。音声認識（Whisper）で生成された日本語テキストの誤変換を修正してください。
 
 ## ルール
@@ -712,6 +715,29 @@ OLLAMA_SYSTEM_PROMPT = """\
 OLLAMA_MODEL = "hf.co/mmnga-o/NVIDIA-Nemotron-Nano-9B-v2-Japanese-gguf:Q4_K_M"
 
 
+def _ollama_refine_batch(system_prompt, batch_texts, ollama_host):
+    """Ollamaに1バッチ送信し、補正結果テキストを返す（失敗時はNone）"""
+    import requests
+    try:
+        resp = requests.post(
+            f"{ollama_host}/api/chat",
+            json={
+                "model": OLLAMA_MODEL,
+                "stream": False,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": f"以下の字幕テキストを修正してください:\n\n{batch_texts}"},
+                ],
+            },
+            timeout=120,
+        )
+        resp.raise_for_status()
+        return resp.json()["message"]["content"].strip()
+    except Exception as e:
+        print(f"  Warning: Ollama補正失敗: {e}")
+        return None
+
+
 def refine_with_ollama(segments, ollama_host, batch_size=10):
     """Ollama LLMでWhisper出力を補正（バッチ処理）"""
     try:
@@ -728,11 +754,11 @@ def refine_with_ollama(segments, ollama_host, batch_size=10):
         print("Warning: 辞書が見つかりません、LLM補正をスキップ")
         return segments
 
-    system_prompt = OLLAMA_SYSTEM_PROMPT.format(
+    system_prompt = REFINE_SYSTEM_PROMPT.format(
         kishi_dictionary=kishi_dict,
         go_terms=go_terms,
     )
-    print(f"LLM補正: 棋士{len(kishi_dict.splitlines())}人 + 囲碁用語{len(go_terms.splitlines())}語")
+    print(f"LLM補正(Ollama): 棋士{len(kishi_dict.splitlines())}人 + 囲碁用語{len(go_terms.splitlines())}語")
 
     # Ollama接続テスト
     try:
@@ -751,37 +777,85 @@ def refine_with_ollama(segments, ollama_host, batch_size=10):
             f"[{j+1}] {seg['text']}" for j, seg in enumerate(batch)
         )
 
-        try:
-            resp = requests.post(
-                f"{ollama_host}/api/chat",
-                json={
-                    "model": OLLAMA_MODEL,
-                    "stream": False,
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": f"以下の字幕テキストを修正してください:\n\n{batch_texts}"},
-                    ],
-                },
-                timeout=120,
-            )
-            resp.raise_for_status()
-            result = resp.json()["message"]["content"].strip()
+        result = _ollama_refine_batch(system_prompt, batch_texts, ollama_host)
 
+        if result:
             # [1] ... [2] ... 形式をパース
             corrected = parse_numbered_response(result, len(batch))
-
             for j, seg in enumerate(batch):
                 new_seg = dict(seg)
                 if j < len(corrected) and corrected[j]:
                     new_seg["text"] = corrected[j]
                 refined.append(new_seg)
-
-            progress = min(i + batch_size, total)
-            print(f"  LLM補正: {progress}/{total} segments")
-
-        except Exception as e:
-            print(f"  Warning: LLM補正失敗 (batch {i//batch_size + 1}): {e}")
+        else:
             refined.extend(batch)
+
+        progress = min(i + batch_size, total)
+        print(f"  LLM補正: {progress}/{total} segments")
+
+    return refined
+
+
+def refine_with_gemini(segments, batch_size=10, ollama_host=None, sleep_sec=7.0):
+    """GeminiでWhisper出力を補正（バッチ処理）。
+
+    Gemini自体が使えない場合はOllamaにまるごと委譲。個別バッチだけGeminiが
+    失敗した場合は、そのバッチのみOllamaにフォールバックする。
+    """
+    if not llm_gemini.gemini_available():
+        print("Warning: Gemini利用不可 (~/.secrets/gemini.env未設定 or SDK未インストール)")
+        if ollama_host:
+            print("  → Ollamaにフォールバック")
+            return refine_with_ollama(segments, ollama_host, batch_size)
+        return segments
+
+    kishi_dict = load_kishi_dictionary()
+    go_terms = load_go_terms()
+
+    if not kishi_dict and not go_terms:
+        print("Warning: 辞書が見つかりません、LLM補正をスキップ")
+        return segments
+
+    system_prompt = REFINE_SYSTEM_PROMPT.format(
+        kishi_dictionary=kishi_dict,
+        go_terms=go_terms,
+    )
+    print(f"LLM補正(Gemini): 棋士{len(kishi_dict.splitlines())}人 + 囲碁用語{len(go_terms.splitlines())}語")
+
+    refined = []
+    total = len(segments)
+
+    for i in range(0, total, batch_size):
+        batch = segments[i:i + batch_size]
+        batch_texts = "\n".join(
+            f"[{j+1}] {seg['text']}" for j, seg in enumerate(batch)
+        )
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"以下の字幕テキストを修正してください:\n\n{batch_texts}"},
+        ]
+        result = llm_gemini.chat(messages, temperature=0.1)
+
+        if result is None and ollama_host:
+            print(f"  Gemini失敗 (batch {i//batch_size + 1}) → このバッチのみOllamaにフォールバック")
+            result = _ollama_refine_batch(system_prompt, batch_texts, ollama_host)
+
+        if result:
+            corrected = parse_numbered_response(result, len(batch))
+            for j, seg in enumerate(batch):
+                new_seg = dict(seg)
+                if j < len(corrected) and corrected[j]:
+                    new_seg["text"] = corrected[j]
+                refined.append(new_seg)
+        else:
+            refined.extend(batch)
+
+        progress = min(i + batch_size, total)
+        print(f"  LLM補正: {progress}/{total} segments")
+
+        if i + batch_size < total:
+            time.sleep(sleep_sec)  # 無料枠 RPM/TPM 対策
 
     return refined
 
@@ -936,7 +1010,12 @@ def main():
     parser.add_argument('transcript', help='Whisper JSON file ([{start, end, text}, ...])')
     parser.add_argument('-o', '--output', default='/tmp/telops.ass', help='出力ASSファイルパス')
     parser.add_argument('-t', '--title', default='囲碁講座', help='字幕タイトル')
-    parser.add_argument('--no-llm', action='store_true', help='LLM補正をスキップ（辞書ルールのみ）')
+    parser.add_argument('--no-llm', action='store_true', help='LLM補正をスキップ（辞書ルールのみ。--llm-backend none と同義）')
+    parser.add_argument('--llm-backend', choices=['gemini', 'ollama', 'none'], default='gemini',
+                         help='LLM補正バックエンド（デフォルト: gemini。利用不可/失敗時はOllamaに自動フォールバック）')
+    parser.add_argument('--gemini-sleep', type=float, default=7.0,
+                         help='Geminiバッチ間の待機秒数（無料枠 RPM/TPM 対策）')
+    parser.add_argument('--save-refined-json', help='LLM補正+辞書補正後のtranscriptをJSON保存（メタデータ生成の入力に使う）')
     parser.add_argument('--ollama-host', default='http://localhost:11434', help='Ollamaホスト')
     parser.add_argument('--batch-size', type=int, default=10, help='LLMバッチサイズ')
     parser.add_argument('--review-names', action='store_true', help='人名候補を表示して確認')
@@ -944,14 +1023,19 @@ def main():
     parser.add_argument('--kishi-fix', action='store_true', help='棋士名辞書で自動修正（pykakasi）')
     args = parser.parse_args()
 
+    if args.no_llm:
+        args.llm_backend = 'none'
+
     with open(args.transcript) as f:
         transcript = json.load(f)
 
     print(f"Transcript: {len(transcript)} segments")
 
-    # LLM補正（Ollama）
-    if not args.no_llm:
+    # LLM補正
+    if args.llm_backend == 'ollama':
         transcript = refine_with_ollama(transcript, args.ollama_host, args.batch_size)
+    elif args.llm_backend == 'gemini':
+        transcript = refine_with_gemini(transcript, args.batch_size, ollama_host=args.ollama_host, sleep_sec=args.gemini_sleep)
 
     # ルールベース修正を適用
     for seg in transcript:
@@ -964,6 +1048,11 @@ def main():
     # 人名レビュー
     if args.review_names:
         review_names(transcript)
+
+    if args.save_refined_json:
+        with open(args.save_refined_json, 'w', encoding='utf-8') as f:
+            json.dump(transcript, f, ensure_ascii=False, indent=2)
+        print(f"Refined transcript saved: {args.save_refined_json}")
 
     # ASS生成
     generate_ass(transcript, args.output, args.title, horizontal=args.horizontal)
