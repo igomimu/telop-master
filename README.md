@@ -42,6 +42,20 @@ pip install --user --break-system-packages auto-editor  # 導入済みならス�
 
 逆に、画面に時計・検討ソフトのアニメーション・マウス移動があると常に「動きあり」になり、カット量は減る（＝安全側に外れる）。
 
+### Windows(YOGAPro)でターミナルを使わずに実行する
+
+録画・編集は YOGAPro の Camtasia で行うため、生録画(数GB)を LEGION に送らず **Windows 側だけで完結**させられる。auto-editor には Python 不要のスタンドアロン .exe がある。
+
+```
+無音カット.bat   ← このリポジトリのファイル
+auto-editor.exe  ← https://github.com/WyattBlue/auto-editor/releases
+                    の auto-editor-windows-x86_64.exe をリネームして同じフォルダに置く
+```
+
+動画ファイルを `無音カット.bat` のアイコンにドラッグ＆ドロップすると、カット量を表示してから同じフォルダに `〜_cut.mp4` を書き出す。複数ファイルの同時ドロップにも対応。しきい値は .bat 冒頭の `AUDIO_TH` / `MOTION_TH` / `MARGIN` をメモ帳で書き換えて調整する。
+
+Windows実機で確認済み(2026-08-19, auto-editor 31.5.0): 判定式・カット結果はLinux版と同一(テスト動画30秒→26.7秒)、既存の出力先は上書きせず中断、引数なし起動はドロップを促して終了。
+
 ### margin と運用上の注意
 
 `--margin 1.5sec` は「音/動きの前後1.5秒は残す」。1.5秒未満の間（次の一手を考える間など）は自動的に残り、それより長い空白だけがカットされる。環境変数 `AUDIO_TH` / `MOTION_TH` / `MARGIN` で調整できる。
